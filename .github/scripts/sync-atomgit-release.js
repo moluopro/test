@@ -190,6 +190,30 @@ async function getAtomGitRelease(tag) {
   )
 }
 
+async function getAtomGitReleaseByTagName(tag) {
+  if (dryRun) {
+    logDryRun(`would query AtomGit release by tag-name endpoint: ${tag}`)
+    return null
+  }
+
+  const url = buildAtomGitApiUrl(
+    `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/tags/${encodeURIComponent(tag)}`
+  )
+  return requestJson(
+    url,
+    {
+      headers: atomgitHeaders(),
+    },
+    { allow404: true }
+  )
+}
+
+async function getAtomGitReleaseForAssets(tag) {
+  const byTagName = await getAtomGitReleaseByTagName(tag)
+  if (byTagName) return byTagName
+  return getAtomGitRelease(tag)
+}
+
 function buildReleasePayload(release) {
   return {
     tag_name: release.tag_name,
@@ -423,8 +447,151 @@ function normalizeAssetSize(asset) {
   return null
 }
 
+function normalizeAssetName(asset) {
+  const candidates = [asset?.name, asset?.file_name, asset?.filename]
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return null
+}
+
+function extractReleaseAssets(release) {
+  const groups = [
+    Array.isArray(release?.assets) ? release.assets : [],
+    Array.isArray(release?.attach_files) ? release.attach_files : [],
+    Array.isArray(release?.attachments) ? release.attachments : [],
+  ]
+  const releaseId = Number(release?.id)
+  const assets = []
+
+  for (const group of groups) {
+    for (const rawAsset of group) {
+      const name = normalizeAssetName(rawAsset)
+      if (!name) continue
+      assets.push({
+        ...rawAsset,
+        name,
+        release_id: rawAsset?.release_id ?? (Number.isFinite(releaseId) ? releaseId : undefined),
+      })
+    }
+  }
+
+  return assets
+}
+
+function parseContentRangeTotal(contentRange) {
+  if (typeof contentRange !== 'string') return null
+  const match = contentRange.match(/\/(\d+)\s*$/)
+  if (!match) return null
+  const value = Number(match[1])
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function extractSizeFromHeaders(headers) {
+  if (!headers) return null
+  const contentLength = Number(headers.get('content-length') || '')
+  if (Number.isFinite(contentLength) && contentLength >= 0) {
+    return contentLength
+  }
+  return parseContentRangeTotal(headers.get('content-range'))
+}
+
+async function probeSizeByHttp(url) {
+  if (!url || typeof url !== 'string') return null
+
+  const requestHeaders = atomgitHeaders({
+    Accept: 'application/octet-stream',
+  })
+
+  try {
+    const headResponse = await fetch(url, {
+      method: 'HEAD',
+      headers: requestHeaders,
+      redirect: 'follow',
+    })
+
+    if (headResponse.ok) {
+      const sizeFromHead = extractSizeFromHeaders(headResponse.headers)
+      if (Number.isFinite(sizeFromHead)) return sizeFromHead
+    }
+  } catch {
+    // Continue to GET range fallback.
+  }
+
+  try {
+    const rangeResponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        ...requestHeaders,
+        Range: 'bytes=0-0',
+      },
+      redirect: 'follow',
+    })
+
+    if (rangeResponse.ok || rangeResponse.status === 206) {
+      const sizeFromRange = extractSizeFromHeaders(rangeResponse.headers)
+      if (Number.isFinite(sizeFromRange)) return sizeFromRange
+    }
+  } catch {
+    // Ignore and let caller handle unknown size.
+  }
+
+  return null
+}
+
+async function probeSizeByAssetApi(asset) {
+  const assetApiUrl = asset?.url
+  if (!assetApiUrl || typeof assetApiUrl !== 'string') return null
+  if (!assetApiUrl.includes('/api/')) return null
+
+  try {
+    const payload = await requestJson(
+      buildAtomGitApiUrl(assetApiUrl.replace(/^https?:\/\/[^/]+/i, '')),
+      {
+        headers: atomgitHeaders(),
+      },
+      { allow404: true }
+    )
+    return normalizeAssetSize(payload)
+  } catch {
+    return null
+  }
+}
+
+function buildAttachFileDownloadUrl(releaseTag, fileName) {
+  if (!releaseTag || !fileName) return null
+  return buildAtomGitApiUrl(
+    `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/${encodeURIComponent(releaseTag)}/attach_files/${encodeURIComponent(fileName)}/download`
+  )
+}
+
+async function resolveAtomGitAssetSize(asset, releaseTag) {
+  const directSize = normalizeAssetSize(asset)
+  if (Number.isFinite(directSize)) return directSize
+
+  const sizeFromApi = await probeSizeByAssetApi(asset)
+  if (Number.isFinite(sizeFromApi)) return sizeFromApi
+
+  const probeUrls = [
+    asset?.browser_download_url,
+    asset?.download_url,
+    asset?.file_url,
+    asset?.url,
+    buildAttachFileDownloadUrl(releaseTag, asset?.name),
+  ].filter((value) => typeof value === 'string' && value.length > 0)
+
+  for (const url of probeUrls) {
+    const size = await probeSizeByHttp(url)
+    if (Number.isFinite(size)) return size
+  }
+
+  return null
+}
+
 function listExistingAssetsByName(release) {
-  const assets = Array.isArray(release?.assets) ? release.assets : []
+  const assets = extractReleaseAssets(release)
   const byName = new Map()
 
   for (const asset of assets) {
@@ -449,7 +616,7 @@ async function deleteAtomGitAsset(asset) {
   }
 
   const fileName = asset?.name || 'unknown'
-  const idCandidates = collectAssetIdCandidates(asset)
+  let idCandidates = collectAssetIdCandidates(asset)
 
   if (dryRun) {
     if (idCandidates.length > 0) {
@@ -461,7 +628,16 @@ async function deleteAtomGitAsset(asset) {
   }
 
   if (idCandidates.length === 0) {
-    throw new Error(`cannot delete existing AtomGit asset ${fileName}: missing asset id`)
+    const refreshedRelease = await getAtomGitReleaseForAssets(releaseTag)
+    const refreshedAssets = listExistingAssetsByName(refreshedRelease)
+    const refreshedAsset = refreshedAssets.get(fileName)
+    idCandidates = collectAssetIdCandidates(refreshedAsset)
+  }
+
+  if (idCandidates.length === 0) {
+    throw new Error(
+      `cannot delete existing AtomGit asset ${fileName}: missing asset id even after refreshing release detail`
+    )
   }
 
   const releaseId = Number(asset?.release_id)
@@ -470,6 +646,15 @@ async function deleteAtomGitAsset(asset) {
   for (const id of idCandidates) {
     deletePaths.push(
       `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/${encodeURIComponent(releaseTag)}/assets/${id}`
+    )
+    deletePaths.push(
+      `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/${encodeURIComponent(releaseTag)}/attach_files/${id}`
+    )
+    deletePaths.push(
+      `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/tags/${encodeURIComponent(releaseTag)}/assets/${id}`
+    )
+    deletePaths.push(
+      `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/tags/${encodeURIComponent(releaseTag)}/attach_files/${id}`
     )
     if (Number.isFinite(releaseId) && releaseId > 0) {
       deletePaths.push(
@@ -481,8 +666,16 @@ async function deleteAtomGitAsset(asset) {
     }
   }
 
+  deletePaths.push(
+    `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/${encodeURIComponent(releaseTag)}/attach_files/${encodeURIComponent(fileName)}`
+  )
+  deletePaths.push(
+    `/api/v5/repos/${encodeURIComponent(atomgitOwner)}/${encodeURIComponent(atomgitRepo)}/releases/tags/${encodeURIComponent(releaseTag)}/attach_files/${encodeURIComponent(fileName)}`
+  )
+
   const uniquePaths = [...new Set(deletePaths)]
   let lastError = null
+  const failedAttempts = []
 
   for (const path of uniquePaths) {
     const url = buildAtomGitApiUrl(path)
@@ -497,10 +690,16 @@ async function deleteAtomGitAsset(asset) {
     }
 
     const text = await response.text()
+    failedAttempts.push(`${response.status} ${path}`)
     lastError = new Error(`DELETE ${url} failed: ${response.status} ${text}`)
   }
 
-  throw lastError || new Error(`failed to delete AtomGit asset: ${fileName}`)
+  if (lastError) {
+    throw new Error(
+      `${lastError.message}; attempted paths: ${failedAttempts.join(' | ')}`
+    )
+  }
+  throw new Error(`failed to delete AtomGit asset: ${fileName}`)
 }
 
 async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
@@ -510,7 +709,9 @@ async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
   }
 
   let syncedCount = 0
-  const existingAssetsByName = listExistingAssetsByName(atomgitRelease)
+  const releaseTag = githubRelease?.tag_name
+  const releaseForAssets = (await getAtomGitReleaseForAssets(releaseTag)) || atomgitRelease
+  const existingAssetsByName = listExistingAssetsByName(releaseForAssets)
   console.log(`[atomgit-sync] max files per run: ${syncBudget.max}, remaining: ${syncBudget.remaining}`)
 
   for (const asset of githubRelease.assets) {
@@ -525,7 +726,7 @@ async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
 
     if (existingAsset) {
       const sourceSize = normalizeAssetSize(asset)
-      const targetSize = normalizeAssetSize(existingAsset)
+      const targetSize = await resolveAtomGitAssetSize(existingAsset, releaseTag)
 
       if (
         Number.isFinite(sourceSize) &&
@@ -536,6 +737,15 @@ async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
           `[atomgit-sync] asset already present with same size, skipped: ${asset.name} (${formatBytes(sourceSize)})`
         )
         continue
+      }
+
+      if (!Number.isFinite(sourceSize)) {
+        throw new Error(`cannot determine source size for ${asset.name}, aborting strict sync`)
+      }
+      if (!Number.isFinite(targetSize)) {
+        throw new Error(
+          `cannot determine AtomGit target size for ${asset.name}, aborting strict sync`
+        )
       }
 
       console.log(
