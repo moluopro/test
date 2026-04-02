@@ -5,6 +5,9 @@ env:
   SOURCE_GITHUB_REPO: godotengine/godot
   TARGET_ATOMGIT_REPO: godothub/godot
   MAX_SYNC_FILES: '100'
+  START_RELEASE_TAG: '3.3-stable'
+  SKIP_RELEASES_BEFORE_START: 'true'
+  SKIP_BRANCH_TAG_MIRROR: 'true'
 # =======================================
 
 on:
@@ -77,6 +80,7 @@ jobs:
           getent hosts file.gitcode.com
 
       - name: Mirror branches and tags to AtomGit
+        if: ${{ env.SKIP_BRANCH_TAG_MIRROR != 'true' }}
         env:
           SOURCE_REPO: ${{ steps.meta.outputs.source_repo }}
           SOURCE_GITHUB_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
@@ -134,4 +138,7 @@ jobs:
           ATOMGIT_API_BASE: ${{ vars.ATOMGIT_API_BASE || 'https://api.atomgit.com' }}
           ATOMGIT_OWNER: ${{ steps.meta.outputs.target_owner }}
           ATOMGIT_REPO: ${{ steps.meta.outputs.target_name }}
+          START_RELEASE_TAG: ${{ env.START_RELEASE_TAG }}
+          SKIP_RELEASES_BEFORE_START: ${{ env.SKIP_RELEASES_BEFORE_START }}
+          MAX_SYNC_FILES: ${{ env.MAX_SYNC_FILES }}
         run: node .github/scripts/sync-atomgit-release.js

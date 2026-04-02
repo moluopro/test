@@ -7,6 +7,10 @@ if (!process.env.GITHUB_TOKEN && process.env.GH_TOKEN) {
 }
 
 const dryRun = ['1', 'true', 'yes'].includes((process.env.DRY_RUN || '').trim().toLowerCase())
+const skipReleasesBeforeStart = ['1', 'true', 'yes'].includes(
+  (process.env.SKIP_RELEASES_BEFORE_START || '').trim().toLowerCase()
+)
+const startReleaseTag = (process.env.START_RELEASE_TAG || '').trim()
 
 const requiredEnv = ['GITHUB_TOKEN']
 
@@ -844,10 +848,27 @@ async function main() {
     return
   }
 
-  console.log(`[atomgit-sync] releases queued: ${githubReleases.length}`)
+  let releasesToSync = githubReleases
+  if (skipReleasesBeforeStart) {
+    if (!startReleaseTag) {
+      throw new Error('SKIP_RELEASES_BEFORE_START=true requires START_RELEASE_TAG to be set')
+    }
+
+    const startIndex = githubReleases.findIndex((release) => release?.tag_name === startReleaseTag)
+    if (startIndex < 0) {
+      throw new Error(`START_RELEASE_TAG not found in GitHub releases: ${startReleaseTag}`)
+    }
+
+    releasesToSync = githubReleases.slice(startIndex)
+    console.log(
+      `[atomgit-sync] skip enabled, ignored ${startIndex} older releases before ${startReleaseTag}`
+    )
+  }
+
+  console.log(`[atomgit-sync] releases queued: ${releasesToSync.length}`)
 
   let processedReleases = 0
-  for (const githubRelease of githubReleases) {
+  for (const githubRelease of releasesToSync) {
     process.env.RELEASE_TAG = githubRelease.tag_name
     console.log(`[atomgit-sync] syncing release ${githubRelease.tag_name}`)
 
