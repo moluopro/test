@@ -219,10 +219,13 @@ async function getAtomGitReleaseForAssets(tag) {
 }
 
 function buildReleasePayload(release) {
+  const normalizedTag = String(release.tag_name || '').trim()
+  const normalizedName = String(release.name || '').trim() || normalizedTag
+
   return {
-    tag_name: release.tag_name,
+    tag_name: normalizedTag,
     target_commitish: release.target_commitish,
-    name: release.name,
+    name: normalizedName,
     body: release.body || '',
     draft: Boolean(release.draft),
     prerelease: Boolean(release.prerelease),
