@@ -578,7 +578,6 @@ async function resolveAtomGitAssetSize(asset, releaseTag) {
     asset?.browser_download_url,
     asset?.download_url,
     asset?.file_url,
-    asset?.url,
     buildAttachFileDownloadUrl(releaseTag, asset?.name),
   ].filter((value) => typeof value === 'string' && value.length > 0)
 
@@ -622,10 +621,13 @@ async function deleteAtomGitAsset(asset) {
     if (idCandidates.length > 0) {
       logDryRun(`would delete AtomGit asset before re-upload: ${fileName} (ids: ${idCandidates.join(', ')})`)
     } else {
-      logDryRun(`would delete AtomGit asset before re-upload: ${fileName} (id unavailable)`)
+      logDryRun(`would delete AtomGit asset before re-upload: ${fileName} (id unavailable, will try filename paths)`)
     }
     return
   }
+
+  const releaseId = Number(asset?.release_id)
+  const deletePaths = []
 
   if (idCandidates.length === 0) {
     const refreshedRelease = await getAtomGitReleaseForAssets(releaseTag)
@@ -633,15 +635,6 @@ async function deleteAtomGitAsset(asset) {
     const refreshedAsset = refreshedAssets.get(fileName)
     idCandidates = collectAssetIdCandidates(refreshedAsset)
   }
-
-  if (idCandidates.length === 0) {
-    throw new Error(
-      `cannot delete existing AtomGit asset ${fileName}: missing asset id even after refreshing release detail`
-    )
-  }
-
-  const releaseId = Number(asset?.release_id)
-  const deletePaths = []
 
   for (const id of idCandidates) {
     deletePaths.push(
@@ -699,7 +692,9 @@ async function deleteAtomGitAsset(asset) {
       `${lastError.message}; attempted paths: ${failedAttempts.join(' | ')}`
     )
   }
-  throw new Error(`failed to delete AtomGit asset: ${fileName}`)
+  const idNote =
+    idCandidates.length === 0 ? ' (asset id unavailable even after refresh; filename-path attempts failed)' : ''
+  throw new Error(`failed to delete AtomGit asset: ${fileName}${idNote}`)
 }
 
 async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
