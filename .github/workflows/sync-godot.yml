@@ -1,0 +1,130 @@
+﻿name: Sync AtomGit Release
+
+# ===== Sync Config (edit here only) =====
+env:
+  SOURCE_GITHUB_REPO: godotengine/godot
+  TARGET_ATOMGIT_REPO: godothub/godot
+  MAX_SYNC_FILES: '100'
+# =======================================
+
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Parse repositories
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPO="${SOURCE_GITHUB_REPO}"
+          TARGET_REPO="${TARGET_ATOMGIT_REPO}"
+
+          if [ -z "${SOURCE_REPO}" ] || [ -z "${TARGET_REPO}" ]; then
+            echo "Missing required config at top-level env: SOURCE_GITHUB_REPO, TARGET_ATOMGIT_REPO." >&2
+            exit 1
+          fi
+
+          if [[ ! "${SOURCE_REPO}" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "source_github_repo must be owner/repo, got: ${SOURCE_REPO}" >&2
+            exit 1
+          fi
+
+          if [[ ! "${TARGET_REPO}" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "atomgit_repo must be owner/repo, got: ${TARGET_REPO}" >&2
+            exit 1
+          fi
+
+          SOURCE_OWNER="${SOURCE_REPO%%/*}"
+          SOURCE_NAME="${SOURCE_REPO#*/}"
+          TARGET_OWNER="${TARGET_REPO%%/*}"
+          TARGET_NAME="${TARGET_REPO#*/}"
+
+          echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "source_owner=${SOURCE_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "source_name=${SOURCE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "target_owner=${TARGET_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "target_name=${TARGET_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AtomGit host resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "159.138.147.37 api.atomgit.com" | sudo tee -a /etc/hosts
+          echo "159.138.147.37 file.atomgit.com" | sudo tee -a /etc/hosts
+          echo "159.138.147.37 file.gitcode.com" | sudo tee -a /etc/hosts
+          getent hosts api.atomgit.com
+          getent hosts file.atomgit.com
+          getent hosts file.gitcode.com
+
+      - name: Mirror branches and tags to AtomGit
+        env:
+          SOURCE_REPO: ${{ steps.meta.outputs.source_repo }}
+          SOURCE_GITHUB_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          ATOMGIT_GIT_HOST: ${{ vars.ATOMGIT_GIT_HOST || 'atomgit.com' }}
+          ATOMGIT_GIT_OWNER: ${{ steps.meta.outputs.target_owner }}
+          ATOMGIT_GIT_REPO: ${{ steps.meta.outputs.target_name }}
+          ATOMGIT_GIT_USERNAME: ${{ secrets.ATOMGIT_GIT_USERNAME }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ATOMGIT_GIT_OWNER}" ] || [ -z "${ATOMGIT_GIT_REPO}" ] || [ -z "${ATOMGIT_GIT_USERNAME}" ] || [ -z "${ATOMGIT_TOKEN}" ]; then
+            echo "Missing AtomGit mirror credentials/variables."
+            exit 1
+          fi
+
+          mkdir -p mirror-repo
+          cd mirror-repo
+          git init
+
+          if [ -n "${SOURCE_GITHUB_TOKEN:-}" ]; then
+            SOURCE_URL="https://x-access-token:${SOURCE_GITHUB_TOKEN}@github.com/${SOURCE_REPO}.git"
+          else
+            SOURCE_URL="https://github.com/${SOURCE_REPO}.git"
+          fi
+
+          TARGET_URL="https://${ATOMGIT_GIT_USERNAME}:${ATOMGIT_TOKEN}@${ATOMGIT_GIT_HOST}/${ATOMGIT_GIT_OWNER}/${ATOMGIT_GIT_REPO}.git"
+
+          git remote add source "$SOURCE_URL"
+          git remote add atomgit "$TARGET_URL"
+
+          git fetch source '+refs/heads/*:refs/remotes/source/*' '+refs/tags/*:refs/tags/*'
+
+          while read -r ref; do
+            branch="${ref#refs/remotes/source/}"
+            git push atomgit "${ref}:refs/heads/${branch}"
+          done < <(git for-each-ref --format='%(refname)' refs/remotes/source | grep -v 'refs/remotes/source/HEAD$')
+
+          git push atomgit 'refs/tags/*:refs/tags/*'
+
+      - name: Sync AtomGit release and assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_OWNER: ${{ steps.meta.outputs.source_owner }}
+          GITHUB_REPO: ${{ steps.meta.outputs.source_name }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          ATOMGIT_API_BASE: ${{ vars.ATOMGIT_API_BASE || 'https://api.atomgit.com' }}
+          ATOMGIT_OWNER: ${{ steps.meta.outputs.target_owner }}
+          ATOMGIT_REPO: ${{ steps.meta.outputs.target_name }}
+        run: node .github/scripts/sync-atomgit-release.js

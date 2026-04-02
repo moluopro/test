@@ -3,7 +3,7 @@
 # ===== Sync Config (edit here only) =====
 env:
   SOURCE_GITHUB_REPO: godotengine/godot-builds
-  TARGET_ATOMGIT_REPO: moluopro/godot-builds
+  TARGET_ATOMGIT_REPO: godothub/godot-builds
   MAX_SYNC_FILES: '100'
 # =======================================
 
