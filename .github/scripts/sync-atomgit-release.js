@@ -541,6 +541,12 @@ async function probeSizeByHttp(url) {
   return null
 }
 
+function isSuspiciousSize(size, expectedSize) {
+  if (!Number.isFinite(size)) return true
+  if (!Number.isFinite(expectedSize)) return false
+  return expectedSize > 1 && size <= 1
+}
+
 async function probeSizeByAssetApi(asset) {
   const assetApiUrl = asset?.url
   if (!assetApiUrl || typeof assetApiUrl !== 'string') return null
@@ -567,23 +573,38 @@ function buildAttachFileDownloadUrl(releaseTag, fileName) {
   )
 }
 
-async function resolveAtomGitAssetSize(asset, releaseTag) {
+async function resolveAtomGitAssetSize(asset, releaseTag, expectedSize) {
+  const probeUrls = [
+    buildAttachFileDownloadUrl(releaseTag, asset?.name),
+    asset?.browser_download_url,
+    asset?.download_url,
+    asset?.file_url,
+  ].filter((value) => typeof value === 'string' && value.length > 0)
+
+  let bestProbeSize = null
+  for (const url of probeUrls) {
+    const size = await probeSizeByHttp(url)
+    if (!Number.isFinite(size)) continue
+    if (!isSuspiciousSize(size, expectedSize)) return size
+    if (!Number.isFinite(bestProbeSize) || size > bestProbeSize) {
+      bestProbeSize = size
+    }
+  }
+
+  if (Number.isFinite(bestProbeSize)) {
+    return bestProbeSize
+  }
+
   const directSize = normalizeAssetSize(asset)
   if (Number.isFinite(directSize)) return directSize
 
   const sizeFromApi = await probeSizeByAssetApi(asset)
   if (Number.isFinite(sizeFromApi)) return sizeFromApi
 
-  const probeUrls = [
-    asset?.browser_download_url,
-    asset?.download_url,
-    asset?.file_url,
-    buildAttachFileDownloadUrl(releaseTag, asset?.name),
-  ].filter((value) => typeof value === 'string' && value.length > 0)
-
-  for (const url of probeUrls) {
-    const size = await probeSizeByHttp(url)
-    if (Number.isFinite(size)) return size
+  if (Number.isFinite(expectedSize) && expectedSize >= 0) {
+    console.log(
+      `[atomgit-sync] cannot confirm remote size via download headers for ${asset?.name || 'unknown'}, expected=${formatBytes(expectedSize)}`
+    )
   }
 
   return null
@@ -593,9 +614,44 @@ function listExistingAssetsByName(release) {
   const assets = extractReleaseAssets(release)
   const byName = new Map()
 
+  function scoreAssetCandidate(asset) {
+    let score = 0
+    const ids = collectAssetIdCandidates(asset)
+    if (ids.length > 0) score += 100
+
+    const size = normalizeAssetSize(asset)
+    if (Number.isFinite(size) && size > 1) score += 20
+    else if (Number.isFinite(size) && size >= 0) score += 5
+
+    if (typeof asset?.download_url === 'string' && asset.download_url) score += 5
+    if (typeof asset?.browser_download_url === 'string' && asset.browser_download_url) score += 5
+    if (typeof asset?.file_url === 'string' && asset.file_url) score += 3
+    if (typeof asset?.url === 'string' && asset.url.includes('/api/')) score += 1
+
+    return { score, size: Number.isFinite(size) ? size : -1 }
+  }
+
   for (const asset of assets) {
     if (!asset?.name) continue
-    byName.set(asset.name, asset)
+    const existing = byName.get(asset.name)
+    if (!existing) {
+      byName.set(asset.name, asset)
+      continue
+    }
+
+    const currentRank = scoreAssetCandidate(asset)
+    const existingRank = scoreAssetCandidate(existing)
+    if (
+      currentRank.score > existingRank.score ||
+      (currentRank.score === existingRank.score && currentRank.size > existingRank.size)
+    ) {
+      if (existingRank.size !== currentRank.size) {
+        console.log(
+          `[atomgit-sync] choose better asset entry for ${asset.name}: ${formatBytes(existingRank.size)} -> ${formatBytes(currentRank.size)}`
+        )
+      }
+      byName.set(asset.name, asset)
+    }
   }
 
   return byName
@@ -721,7 +777,7 @@ async function syncAssets(githubRelease, atomgitRelease, syncBudget) {
 
     if (existingAsset) {
       const sourceSize = normalizeAssetSize(asset)
-      const targetSize = await resolveAtomGitAssetSize(existingAsset, releaseTag)
+      const targetSize = await resolveAtomGitAssetSize(existingAsset, releaseTag, sourceSize)
 
       if (
         Number.isFinite(sourceSize) &&
