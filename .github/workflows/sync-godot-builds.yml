@@ -1,4 +1,4 @@
-﻿name: Sync Snapshot
+name: Sync Snapshot
 
 # ===== Sync Config (edit here only) =====
 env:
@@ -23,7 +23,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout workflow repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
