@@ -5,7 +5,7 @@ env:
   SOURCE_GITHUB_REPO: godotengine/godot-builds
   TARGET_ATOMGIT_REPO: godothub/godot-builds
   MAX_SYNC_FILES: '200'
-  START_RELEASE_TAG: '3.6.1-stable'
+  START_RELEASE_TAG: '4.5-beta3'
   SKIP_RELEASES_BEFORE_START: 'true'
   SKIP_BRANCH_TAG_MIRROR: 'true'
 # =======================================
