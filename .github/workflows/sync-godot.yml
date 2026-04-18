@@ -1,4 +1,4 @@
-name: Sync Stable
+﻿name: Sync Stable
 
 # ===== Sync Config (edit here only) =====
 env:
@@ -7,7 +7,7 @@ env:
   MAX_SYNC_FILES: '100'
   START_RELEASE_TAG: '4.6.2-stable'
   SKIP_RELEASES_BEFORE_START: 'true'
-  SKIP_BRANCH_TAG_MIRROR: 'true'
+  SKIP_BRANCH_TAG_MIRROR: 'false'
 # =======================================
 
 on:

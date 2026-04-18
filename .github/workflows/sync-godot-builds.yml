@@ -4,15 +4,15 @@
 env:
   SOURCE_GITHUB_REPO: godotengine/godot-builds
   TARGET_ATOMGIT_REPO: godothub/godot-builds
-  MAX_SYNC_FILES: '200'
+  MAX_SYNC_FILES: '100'
   START_RELEASE_TAG: '4.6.2-stable'
   SKIP_RELEASES_BEFORE_START: 'true'
-  SKIP_BRANCH_TAG_MIRROR: 'true'
+  SKIP_BRANCH_TAG_MIRROR: 'false'
 # =======================================
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 16 * * *'
   workflow_dispatch:
 
 jobs:
